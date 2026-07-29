@@ -1,7 +1,8 @@
-# --- Raw OpenAlex harvest (bulky; deposited to Zenodo per registration §5) ---
+# --- Raw OpenAlex harvest (large will be deposited to Zenodo per registration §5) ---
 # Keeping the code and manifest in git; keeping the large raw JSON out of GitHub.
 data/raw/*.json
-!data/raw/query_manifest.json      # small manifest tracked
+!data/raw/query_manifest.json      # keeping the small manifest tracked
+data/raw/_checkpoint.json          # harvest resume checkpoint (transient)
 
 # --- Local spreadsheet working copies (CSV is the committed form) ---
 *.xlsx

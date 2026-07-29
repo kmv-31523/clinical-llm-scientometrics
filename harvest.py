@@ -5,7 +5,7 @@ harvest.py — OpenAlex retrieval for the clinical-LLM scientometrics study.
 Authors: Krishna Sai Vasireddy and Monika Rao Mandava
 Part of: clinical-llm-scientometrics (see repository README and OSF registration).
 
-This implements the pre-registered retrieval (§3.1) and ambiguous-term routing (§3.2),
+Implements the pre-registered retrieval (§3.1) and ambiguous-term routing (§3.2),
 using local term matching so the matching logic is fully specified by this file
 and reproducible independently of OpenAlex's internal search parsing:
 
@@ -22,7 +22,7 @@ Outputs (under data/):
 This script retrieves, matches terms, flags ambiguous-only hits, and archives.
 It does not decide eligibility — that is human screening (§3.3).
 
-Script will be run only after the seed set is committed and the registration is archived.
+Run only after the seed set is committed and the registration is archived.
 """
 
 from __future__ import annotations
@@ -37,10 +37,7 @@ from urllib.parse import urlencode
 
 import requests
 
-# ----------------------------------------------------------------------------
-# Pre-registered term lists (registration §3.1). Edit ONLY to match the
-# registration text; any change here is a deviation and must be logged.
-# ----------------------------------------------------------------------------
+
 
 # Unambiguous LLM terms: presence of any one of these satisfies the LLM condition
 # on its own (no manual screening needed on LLM grounds).
@@ -176,34 +173,65 @@ def build_filter(search_value: str) -> str:
     ])
 
 
-def harvest(mailto: str, raw_dir: Path, max_pages: int | None) -> list[dict]:
-    """Page through all matching works; archive each raw page; return all records."""
+def harvest(api_key: str | None, raw_dir: Path, max_pages: int | None) -> list[dict]:
+    """Page through all matching works; archive each raw page; return all records.
+
+    Resumable: the next cursor and page number are checkpointed after every page
+    to raw_dir/_checkpoint.json. If the run is interrupted (including by hitting a
+    daily credit cap), re-running resumes from the last saved cursor and reloads
+    already-archived pages from disk rather than re-fetching them.
+    """
     raw_dir.mkdir(parents=True, exist_ok=True)
     session = requests.Session()
-    session.headers.update({"User-Agent": f"clinical-llm-scientometrics (mailto:{mailto})"})
+    session.headers.update({"User-Agent": "clinical-llm-scientometrics"})
 
     search_value = build_search()
     filt = build_filter(search_value)
-    cursor = "*"
+    checkpoint = raw_dir / "_checkpoint.json"
+
     all_records: list[dict] = []
+    cursor = "*"
     page = 0
     total_reported = None
+
+    # --- resume from checkpoint if present ---
+    if checkpoint.exists():
+        try:
+            cp = json.loads(checkpoint.read_text(encoding="utf-8"))
+            cursor = cp.get("next_cursor", "*")
+            page = cp.get("page", 0)
+            total_reported = cp.get("total_reported")
+            print(f"Resuming from checkpoint: page {page}, "
+                  f"cursor {'set' if cursor and cursor != '*' else 'start'}.")
+            # reload already-archived pages so counts and CSV are complete
+            for pf in sorted(raw_dir.glob("openalex_page_*.json")):
+                try:
+                    d = json.loads(pf.read_text(encoding="utf-8"))
+                    all_records.extend(d.get("results", []))
+                except Exception as e:
+                    print(f"    warning: could not reload {pf.name}: {e}")
+            print(f"  reloaded {len(all_records)} records from {page} archived pages.")
+        except Exception as e:
+            print(f"    checkpoint unreadable ({e}); starting fresh.")
+            cursor, page, all_records = "*", 0, []
+
+    select_fields = ",".join([
+        "id", "doi", "title", "display_name", "publication_year",
+        "publication_date", "type", "language", "abstract_inverted_index",
+        "authorships", "primary_location", "locations",
+        "cited_by_count", "referenced_works", "topics", "concepts",
+        "is_retracted", "open_access", "ids",
+    ])
 
     while True:
         params = {
             "filter": filt,
             "per-page": PER_PAGE,
             "cursor": cursor,
-            "mailto": mailto,
-            # select only the fields we need; keeps raw payloads lean but complete
-            "select": ",".join([
-                "id", "doi", "title", "display_name", "publication_year",
-                "publication_date", "type", "language", "abstract_inverted_index",
-                "authorships", "primary_location", "locations",
-                "cited_by_count", "referenced_works", "topics", "concepts",
-                "is_retracted", "open_access", "ids",
-            ]),
+            "select": select_fields,
         }
+        if api_key:
+            params["api_key"] = api_key
         url = f"{OPENALEX_WORKS}?{urlencode(params)}"
         resp = _get_with_retry(session, url)
         data = resp.json()
@@ -217,41 +245,69 @@ def harvest(mailto: str, raw_dir: Path, max_pages: int | None) -> list[dict]:
             break
 
         page += 1
-        # archive the raw page exactly as returned
         (raw_dir / f"openalex_page_{page:04d}.json").write_text(
             json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
         )
         all_records.extend(results)
-        print(f"  page {page}: +{len(results)} (running total {len(all_records)})")
 
         cursor = data.get("meta", {}).get("next_cursor")
+
+        # checkpoint AFTER archiving the page and reading the next cursor
+        checkpoint.write_text(json.dumps({
+            "page": page,
+            "next_cursor": cursor,
+            "total_reported": total_reported,
+        }), encoding="utf-8")
+
+        if page % 25 == 0 or page <= 3:
+            print(f"  page {page}: +{len(results)} (running total {len(all_records)})")
+
         if not cursor:
             break
         if max_pages and page >= max_pages:
             print(f"Stopping early at max_pages={max_pages} (DRY/partial run).")
             break
-        time.sleep(0.2)  # be polite even in the pool
+        time.sleep(0.5)  # be polite; keep well under the rate limit
 
     return all_records, total_reported
 
 
-def _get_with_retry(session, url, tries=5):
+def _get_with_retry(session, url, tries=8):
+    """GET with backoff. Rate-limits (429) get long, patient waits because
+    OpenAlex cooldowns clear over minutes, not seconds; a Retry-After header,
+    if present, is respected. Other transient errors get shorter backoff."""
     for attempt in range(1, tries + 1):
         try:
-            r = session.get(url, timeout=60)
+            r = session.get(url, timeout=90)
             if r.status_code == 200:
                 return r
-            if r.status_code in (429, 500, 502, 503):
-                wait = min(2 ** attempt, 30)
+            if r.status_code == 429:
+                # honor Retry-After if given, else escalate: 60,120,180,... capped
+                ra = r.headers.get("Retry-After")
+                if ra and ra.isdigit():
+                    wait = int(ra)
+                else:
+                    wait = min(60 * attempt, 300)
+                print(f"    HTTP 429 (rate limited); waiting {wait}s "
+                      f"[retry {attempt}/{tries}]")
+                time.sleep(wait)
+                continue
+            if r.status_code in (500, 502, 503, 504):
+                wait = min(10 * attempt, 120)
                 print(f"    HTTP {r.status_code}; retry {attempt}/{tries} in {wait}s")
                 time.sleep(wait)
                 continue
             r.raise_for_status()
         except requests.RequestException as e:
-            wait = min(2 ** attempt, 30)
-            print(f"    {e}; retry {attempt}/{tries} in {wait}s")
+            wait = min(10 * attempt, 120)
+            print(f"    {type(e).__name__}: {e}; retry {attempt}/{tries} in {wait}s")
             time.sleep(wait)
-    raise RuntimeError(f"Failed after {tries} attempts: {url}")
+    raise RuntimeError(
+        f"Failed after {tries} attempts. If these were 429 rate-limit errors, "
+        f"WAIT 30-60 MINUTES before re-running — the IP is in a cooldown that more "
+        f"retries won't clear. The checkpoint is saved; re-running resumes from the "
+        f"last good page.\nURL: {url}"
+    )
 
 
 # ----------------------------------------------------------------------------
@@ -319,11 +375,28 @@ def write_csv(rows: list[dict], path: Path):
     print(f"Wrote {len(rows)} rows -> {path}")
 
 
+def resolve_api_key(cli_value: str | None, base: Path) -> str | None:
+    """Resolve the OpenAlex API key from, in order: --api-key flag,
+    OPENALEX_API_KEY env var, or a local .openalex_key file (repo root).
+    Returns None if none found (caller warns)."""
+    import os
+    if cli_value:
+        return cli_value.strip()
+    env = os.environ.get("OPENALEX_API_KEY")
+    if env:
+        return env.strip()
+    key_file = Path(".openalex_key")
+    if key_file.exists():
+        return key_file.read_text(encoding="utf-8").strip()
+    return None
+
+
 # ----------------------------------------------------------------------------
 def main():
     ap = argparse.ArgumentParser(description="OpenAlex harvest for clinical-LLM study.")
-    ap.add_argument("--mailto", default="vasireddyfam@outlook.com",
-                    help="Email for OpenAlex's polite pool.")
+    ap.add_argument("--api-key", default=None,
+                    help="OpenAlex API key. If omitted, reads OPENALEX_API_KEY "
+                         "env var, then a local .openalex_key file.")
     ap.add_argument("--out", default="data", help="Output base dir (default: data).")
     ap.add_argument("--max-pages", type=int, default=None,
                     help="Cap pages for a dry/partial test run. Omit for full harvest.")
@@ -333,15 +406,22 @@ def main():
     raw_dir = base / "raw"
     snapshot = datetime.now(timezone.utc).isoformat()
 
+    api_key = resolve_api_key(args.api_key, base)
+    if not api_key:
+        print("WARNING: no API key found (flag/env/.openalex_key). OpenAlex now "
+              "requires a key; without one you'll get limited free credits then "
+              "errors. Proceeding anyway in case free credits remain.")
+
     print("=" * 70)
     print("HARVEST — clinical-LLM scientometrics")
     print(f"  snapshot (UTC): {snapshot}")
     print(f"  date window:    {DATE_FROM} .. {DATE_TO}")
     print(f"  types:          {WORK_TYPES}")
     print(f"  matching:       LOCAL (both-term rule applied in Python)")
+    print(f"  api key:        {'present' if api_key else 'MISSING'}")
     print("=" * 70)
 
-    records, total_reported = harvest(args.mailto, raw_dir, args.max_pages)
+    records, total_reported = harvest(api_key, raw_dir, args.max_pages)
     print(f"Retrieved {len(records)} raw records across the server-side filter.")
 
     rows = [classify_record(r) for r in records]
