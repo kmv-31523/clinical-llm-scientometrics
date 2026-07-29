@@ -1,0 +1,24 @@
+# --- Raw OpenAlex harvest (bulky; deposited to Zenodo per registration §5) ---
+# Keeping the code and manifest in git; keeping the large raw JSON out of GitHub.
+data/raw/*.json
+!data/raw/query_manifest.json      # small manifest tracked
+
+# --- Local spreadsheet working copies (CSV is the committed form) ---
+*.xlsx
+*.xls
+~$*
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.venv/
+venv/
+env/
+
+# --- OS / editor cruft ---
+.DS_Store
+Thumbs.db
+*.swp
+.vscode/
+.idea/
