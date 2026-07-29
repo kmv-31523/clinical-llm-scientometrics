@@ -1,0 +1,68 @@
+{
+  "snapshot_utc": "2026-07-29T22:18:25.587506+00:00",
+  "date_from": "2019-01-01",
+  "date_to": "2026-03-31",
+  "work_types": [
+    "article",
+    "review",
+    "preprint"
+  ],
+  "matching": "local both-term (LLM AND clinical), word-boundary, normalized",
+  "openalex_filter": "from_publication_date:2019-01-01,to_publication_date:2026-03-31,type:article|review|preprint",
+  "llm_terms_unambiguous": [
+    "large language model",
+    "large language models",
+    "gpt-3",
+    "gpt-3.5",
+    "gpt-4",
+    "gpt-4o",
+    "chatgpt",
+    "med-palm",
+    "biogpt",
+    "clinicalbert",
+    "generative pre-trained",
+    "generative pretrained",
+    "foundation model",
+    "generative ai"
+  ],
+  "llm_terms_ambiguous": [
+    "gpt",
+    "llm",
+    "palm",
+    "gemini",
+    "claude",
+    "llama",
+    "mistral"
+  ],
+  "clinical_terms": [
+    "clinical",
+    "clinician",
+    "medical",
+    "medicine",
+    "patient",
+    "physician",
+    "diagnosis",
+    "diagnostic",
+    "healthcare",
+    "hospital",
+    "nursing",
+    "surgery",
+    "radiology",
+    "pathology",
+    "psychiatry",
+    "oncology",
+    "primary care",
+    "electronic health record",
+    "ehr",
+    "medical education",
+    "triage",
+    "prognosis"
+  ],
+  "counts": {
+    "server_side_reported": 49936476,
+    "records_retrieved": 400,
+    "both_term_hits": 0,
+    "ambiguous_only_needs_screening": 0,
+    "retrieved_without_abstract": 116
+  }
+}

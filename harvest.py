@@ -5,7 +5,7 @@ harvest.py — OpenAlex retrieval for the clinical-LLM scientometrics study.
 Authors: Krishna Sai Vasireddy and Monika Rao Mandava
 Part of: clinical-llm-scientometrics (see repository README and OSF registration).
 
-Implements the pre-registered retrieval (§3.1) and ambiguous-term routing (§3.2),
+This implements the pre-registered retrieval (§3.1) and ambiguous-term routing (§3.2),
 using local term matching so the matching logic is fully specified by this file
 and reproducible independently of OpenAlex's internal search parsing:
 
@@ -37,7 +37,9 @@ from urllib.parse import urlencode
 
 import requests
 
-
+# ----------------------------------------------------------------------------
+# Pre-registered term lists (registration §3.1). Edit ONLY to match the
+# registration text; any change here is a deviation and must be logged.
 # ----------------------------------------------------------------------------
 
 # Unambiguous LLM terms: presence of any one of these satisfies the LLM condition
@@ -133,11 +135,44 @@ def reconstruct_abstract(inv_index: dict | None) -> str:
 # ----------------------------------------------------------------------------
 # OpenAlex paging (cursor-based; polite pool)
 # ----------------------------------------------------------------------------
-def build_filter() -> str:
+
+# Server-side search terms: OR-ed into a title_and_abstract.search query to
+# narrow OpenAlex to a candidate pool of plausibly-LLM works BEFORE local
+# matching. This is a recall net, not the final filter — the precise both-term
+# and ambiguous-routing rules are re-applied locally in classify_record().
+#
+# Included: unambiguous LLM terms + the ambiguous short terms that, when they
+# appear in a title/abstract, are still worth pulling for local screening.
+# The local matcher decides what actually counts; this only decides what to
+# fetch. The exact query is recorded in query_manifest.json.
+SEARCH_TERMS = [
+    "large language model", "large language models",
+    "chatgpt", "gpt-4", "gpt-3", "gpt-3.5", "gpt-4o",
+    "med-palm", "biogpt", "clinicalbert",
+    "generative pre-trained", "generative pretrained",
+    "generative ai", "foundation model",
+    "gpt", "llm", "llama", "mistral", "gemini", "claude", "palm",
+]
+
+
+def build_search() -> str:
+    """Build an OpenAlex title/abstract search: quoted phrases joined by OR.
+
+    OpenAlex supports uppercase boolean operators (AND/OR/NOT) in the search
+    value, with double-quoted phrases for exact matching. This is a recall net;
+    the precise both-term and ambiguous-routing rules are re-applied locally in
+    classify_record(). Note OpenAlex applies stemming and drops stop-words, so
+    the returned pool is a superset that local matching then filters exactly.
+    """
+    return " OR ".join(f'"{t}"' for t in SEARCH_TERMS)
+
+
+def build_filter(search_value: str) -> str:
     return ",".join([
         f"from_publication_date:{DATE_FROM}",
         f"to_publication_date:{DATE_TO}",
         f"type:{'|'.join(WORK_TYPES)}",
+        f"title_and_abstract.search:{search_value}",
     ])
 
 
@@ -147,7 +182,8 @@ def harvest(mailto: str, raw_dir: Path, max_pages: int | None) -> list[dict]:
     session = requests.Session()
     session.headers.update({"User-Agent": f"clinical-llm-scientometrics (mailto:{mailto})"})
 
-    filt = build_filter()
+    search_value = build_search()
+    filt = build_filter(search_value)
     cursor = "*"
     all_records: list[dict] = []
     page = 0
@@ -219,7 +255,7 @@ def _get_with_retry(session, url, tries=5):
 
 
 # ----------------------------------------------------------------------------
-# Applying the pre-registered term logic locally
+# Apply the pre-registered term logic locally
 # ----------------------------------------------------------------------------
 def classify_record(rec: dict) -> dict:
     title = rec.get("title") or rec.get("display_name") or ""
@@ -322,7 +358,9 @@ def main():
         "date_to": DATE_TO,
         "work_types": WORK_TYPES,
         "matching": "local both-term (LLM AND clinical), word-boundary, normalized",
-        "openalex_filter": build_filter(),
+        "openalex_filter": build_filter(build_search()),
+        "server_side_search": build_search(),
+        "server_side_search_terms": SEARCH_TERMS,
         "llm_terms_unambiguous": LLM_TERMS_UNAMBIGUOUS,
         "llm_terms_ambiguous": LLM_TERMS_AMBIGUOUS,
         "clinical_terms": CLINICAL_TERMS,
